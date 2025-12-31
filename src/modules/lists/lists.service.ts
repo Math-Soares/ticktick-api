@@ -33,7 +33,7 @@ export class ListsService {
       orderBy: [asc(schema.lists.position)],
       extras: {
         taskCount:
-          sql<number>`(SELECT count(*) FROM "Task" WHERE "Task"."listId" = "List"."id" AND "Task"."deletedAt" IS NULL AND "Task"."completedAt" IS NULL)`.as(
+          sql<number>`(SELECT count(*) FROM "Task" WHERE "Task"."listId" = "lists"."id" AND "Task"."deletedAt" IS NULL AND "Task"."completedAt" IS NULL)`.as(
             "task_count",
           ),
       },
