@@ -1,8 +1,11 @@
-import { Injectable, UnauthorizedException } from "@nestjs/common";
+import { Injectable, UnauthorizedException, Inject } from "@nestjs/common";
 import { PassportStrategy } from "@nestjs/passport";
 import { ExtractJwt, Strategy } from "passport-jwt";
 import { ConfigService } from "@nestjs/config";
-import { PrismaService } from "../../../prisma/prisma.service";
+import { DRIZZLE } from "../../../drizzle/drizzle.provider";
+import { NodePgDatabase } from "drizzle-orm/node-postgres";
+import * as schema from "../../../drizzle/schema";
+import { eq } from "drizzle-orm";
 
 interface JwtPayload {
   sub: string;
@@ -12,7 +15,7 @@ interface JwtPayload {
 @Injectable()
 export class JwtStrategy extends PassportStrategy(Strategy) {
   constructor(
-    private prisma: PrismaService,
+    @Inject(DRIZZLE) private db: NodePgDatabase<typeof schema>,
     configService: ConfigService,
   ) {
     super({
@@ -23,8 +26,8 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
   }
 
   async validate(payload: JwtPayload) {
-    const user = await this.prisma.user.findUnique({
-      where: { id: payload.sub },
+    const user = await this.db.query.users.findFirst({
+      where: eq(schema.users.id, payload.sub),
     });
 
     if (!user) {

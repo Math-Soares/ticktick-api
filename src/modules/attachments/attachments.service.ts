@@ -2,8 +2,12 @@ import {
     Injectable,
     NotFoundException,
     BadRequestException,
+    Inject,
 } from "@nestjs/common";
-import { PrismaService } from "../../prisma/prisma.service";
+import { DRIZZLE } from "../../drizzle/drizzle.provider";
+import { NodePgDatabase } from "drizzle-orm/node-postgres";
+import * as schema from "../../drizzle/schema";
+import { eq, and, desc } from "drizzle-orm";
 import * as fs from "fs";
 import * as path from "path";
 
@@ -31,7 +35,7 @@ const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
 export class AttachmentsService {
     private readonly uploadDir: string;
 
-    constructor(private prisma: PrismaService) {
+    constructor(@Inject(DRIZZLE) private db: NodePgDatabase<typeof schema>) {
         this.uploadDir = path.join(process.cwd(), "uploads");
         if (!fs.existsSync(this.uploadDir)) {
             fs.mkdirSync(this.uploadDir, { recursive: true });
@@ -52,14 +56,10 @@ export class AttachmentsService {
         }
     }
 
-    async upload(
-        userId: string,
-        taskId: string,
-        file: Express.Multer.File,
-    ) {
+    async upload(userId: string, taskId: string, file: Express.Multer.File) {
         // Verify task ownership
-        const task = await this.prisma.task.findFirst({
-            where: { id: taskId, userId },
+        const task = await this.db.query.tasks.findFirst({
+            where: and(eq(schema.tasks.id, taskId), eq(schema.tasks.userId, userId)),
         });
         if (!task) {
             throw new NotFoundException("Task not found");
@@ -68,38 +68,39 @@ export class AttachmentsService {
         this.validateFile(file);
 
         // Create attachment record
-        const attachment = await this.prisma.attachment.create({
-            data: {
+        const [attachment] = await this.db
+            .insert(schema.attachments)
+            .values({
                 filename: file.originalname,
                 storedName: file.filename,
                 mimeType: file.mimetype,
                 size: file.size,
                 taskId,
-            },
-        });
+            })
+            .returning();
 
         return attachment;
     }
 
     async findByTask(userId: string, taskId: string) {
         // Verify task ownership
-        const task = await this.prisma.task.findFirst({
-            where: { id: taskId, userId },
+        const task = await this.db.query.tasks.findFirst({
+            where: and(eq(schema.tasks.id, taskId), eq(schema.tasks.userId, userId)),
         });
         if (!task) {
             throw new NotFoundException("Task not found");
         }
 
-        return this.prisma.attachment.findMany({
-            where: { taskId },
-            orderBy: { createdAt: "desc" },
+        return this.db.query.attachments.findMany({
+            where: eq(schema.attachments.taskId, taskId),
+            orderBy: [desc(schema.attachments.createdAt)],
         });
     }
 
     async getFilePath(userId: string, attachmentId: string) {
-        const attachment = await this.prisma.attachment.findUnique({
-            where: { id: attachmentId },
-            include: { task: true },
+        const attachment = await this.db.query.attachments.findFirst({
+            where: eq(schema.attachments.id, attachmentId),
+            with: { task: true },
         });
 
         if (!attachment || attachment.task.userId !== userId) {
@@ -119,9 +120,9 @@ export class AttachmentsService {
     }
 
     async delete(userId: string, attachmentId: string) {
-        const attachment = await this.prisma.attachment.findUnique({
-            where: { id: attachmentId },
-            include: { task: true },
+        const attachment = await this.db.query.attachments.findFirst({
+            where: eq(schema.attachments.id, attachmentId),
+            with: { task: true },
         });
 
         if (!attachment || attachment.task.userId !== userId) {
@@ -135,9 +136,9 @@ export class AttachmentsService {
         }
 
         // Delete database record
-        await this.prisma.attachment.delete({
-            where: { id: attachmentId },
-        });
+        await this.db
+            .delete(schema.attachments)
+            .where(eq(schema.attachments.id, attachmentId));
 
         return { success: true };
     }

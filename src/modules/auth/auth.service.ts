@@ -3,23 +3,27 @@ import {
   UnauthorizedException,
   ConflictException,
   NotFoundException,
+  Inject,
 } from "@nestjs/common";
 import { JwtService } from "@nestjs/jwt";
 import * as bcrypt from "bcryptjs";
-import { PrismaService } from "../../prisma/prisma.service";
+import { DRIZZLE } from "../../drizzle/drizzle.provider";
+import { NodePgDatabase } from "drizzle-orm/node-postgres";
+import * as schema from "../../drizzle/schema";
+import { eq } from "drizzle-orm";
 import { RegisterDto, LoginDto } from "./dto/auth.dto";
 
 @Injectable()
 export class AuthService {
   constructor(
-    private prisma: PrismaService,
+    @Inject(DRIZZLE) private db: NodePgDatabase<typeof schema>,
     private jwtService: JwtService,
-  ) {}
+  ) { }
 
   async register(dto: RegisterDto) {
     // Check if user exists
-    const existingUser = await this.prisma.user.findUnique({
-      where: { email: dto.email },
+    const existingUser = await this.db.query.users.findFirst({
+      where: eq(schema.users.email, dto.email),
     });
 
     if (existingUser) {
@@ -30,20 +34,21 @@ export class AuthService {
     const hashedPassword = await bcrypt.hash(dto.password, 10);
 
     // Create user
-    const user = await this.prisma.user.create({
-      data: {
+    const [user] = await this.db
+      .insert(schema.users)
+      .values({
         email: dto.email,
         name: dto.name,
         password: hashedPassword,
-      },
-    });
+      })
+      .returning();
 
     return this.generateTokens(user.id, user.email);
   }
 
   async login(dto: LoginDto) {
-    const user = await this.prisma.user.findUnique({
-      where: { email: dto.email },
+    const user = await this.db.query.users.findFirst({
+      where: eq(schema.users.email, dto.email),
     });
 
     if (!user) {
@@ -60,9 +65,9 @@ export class AuthService {
   }
 
   async getProfile(userId: string) {
-    const user = await this.prisma.user.findUnique({
-      where: { id: userId },
-      select: {
+    const user = await this.db.query.users.findFirst({
+      where: eq(schema.users.id, userId),
+      columns: {
         id: true,
         email: true,
         name: true,
@@ -77,10 +82,7 @@ export class AuthService {
   }
 
   async deleteAccount(userId: string) {
-    // Prisma will handle cascade deletion for tasks, habits, and lists
-    await this.prisma.user.delete({
-      where: { id: userId },
-    });
+    await this.db.delete(schema.users).where(eq(schema.users.id, userId));
 
     return { success: true };
   }

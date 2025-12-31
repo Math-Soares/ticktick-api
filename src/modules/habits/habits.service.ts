@@ -1,32 +1,38 @@
-import { Injectable, NotFoundException } from "@nestjs/common";
-import { PrismaService } from "../../prisma/prisma.service";
+import { Injectable, NotFoundException, Inject } from "@nestjs/common";
+import { DRIZZLE } from "../../drizzle/drizzle.provider";
+import { NodePgDatabase } from "drizzle-orm/node-postgres";
+import * as schema from "../../drizzle/schema";
+import { eq, and, isNull, gte, lte, desc, sql, sum, count } from "drizzle-orm";
 import { CreateHabitDto, UpdateHabitDto, LogHabitDto } from "./dto/habits.dto";
 import { startOfWeek, endOfWeek, subDays, format } from "date-fns";
 
 @Injectable()
 export class HabitsService {
-  constructor(private prisma: PrismaService) {}
+  constructor(
+    @Inject(DRIZZLE) private db: NodePgDatabase<typeof schema>,
+  ) { }
 
   async create(userId: string, dto: CreateHabitDto) {
-    return this.prisma.habit.create({
-      data: {
+    const [habit] = await this.db
+      .insert(schema.habits)
+      .values({
         ...dto,
         userId,
-      },
-    });
+      })
+      .returning();
+    return habit;
   }
 
   async findAll(userId: string) {
-    const habits = await this.prisma.habit.findMany({
-      where: { userId, archivedAt: null },
-      include: {
+    const habits = await this.db.query.habits.findMany({
+      where: and(
+        eq(schema.habits.userId, userId),
+        isNull(schema.habits.archivedAt),
+      ),
+      with: {
         logs: {
-          where: {
-            date: {
-              gte: subDays(new Date(), 30),
-            },
-          },
-          orderBy: { date: "desc" },
+          where: (logs, { gte }) => gte(logs.date, subDays(new Date(), 30)),
+          orderBy: (logs, { desc }) => [desc(logs.date)],
         },
       },
     });
@@ -35,12 +41,15 @@ export class HabitsService {
   }
 
   async findOne(userId: string, habitId: string) {
-    const habit = await this.prisma.habit.findFirst({
-      where: { id: habitId, userId },
-      include: {
+    const habit = await this.db.query.habits.findFirst({
+      where: and(
+        eq(schema.habits.id, habitId),
+        eq(schema.habits.userId, userId),
+      ),
+      with: {
         logs: {
-          orderBy: { date: "desc" },
-          take: 90,
+          orderBy: (logs, { desc }) => [desc(logs.date)],
+          limit: 90,
         },
       },
     });
@@ -55,27 +64,31 @@ export class HabitsService {
   async update(userId: string, habitId: string, dto: UpdateHabitDto) {
     await this.findOne(userId, habitId);
 
-    return this.prisma.habit.update({
-      where: { id: habitId },
-      data: dto,
-    });
+    const [updated] = await this.db
+      .update(schema.habits)
+      .set(dto)
+      .where(eq(schema.habits.id, habitId))
+      .returning();
+
+    return updated;
   }
 
   async archive(userId: string, habitId: string) {
     await this.findOne(userId, habitId);
 
-    return this.prisma.habit.update({
-      where: { id: habitId },
-      data: { archivedAt: new Date() },
-    });
+    const [updated] = await this.db
+      .update(schema.habits)
+      .set({ archivedAt: new Date() })
+      .where(eq(schema.habits.id, habitId))
+      .returning();
+
+    return updated;
   }
 
   async delete(userId: string, habitId: string) {
     await this.findOne(userId, habitId);
 
-    await this.prisma.habit.delete({
-      where: { id: habitId },
-    });
+    await this.db.delete(schema.habits).where(eq(schema.habits.id, habitId));
 
     return { success: true };
   }
@@ -87,24 +100,22 @@ export class HabitsService {
     const dateOnly = new Date(`${dateStr}T00:00:00Z`);
 
     // Upsert the log
-    const log = await this.prisma.habitLog.upsert({
-      where: {
-        habitId_date: {
-          habitId,
-          date: dateOnly,
-        },
-      },
-      update: {
-        count: { increment: 1 },
-        notes: dto.notes,
-      },
-      create: {
+    const [log] = await this.db
+      .insert(schema.habitLogs)
+      .values({
         habitId,
         date: dateOnly,
         count: 1,
         notes: dto.notes,
-      },
-    });
+      })
+      .onConflictDoUpdate({
+        target: [schema.habitLogs.habitId, schema.habitLogs.date],
+        set: {
+          count: sql`${schema.habitLogs.count} + 1`,
+          notes: dto.notes,
+        },
+      })
+      .returning();
 
     // Update streak
     await this.updateStreak(habitId);
@@ -117,12 +128,14 @@ export class HabitsService {
 
     const dateOnly = new Date(`${date}T00:00:00Z`);
 
-    await this.prisma.habitLog.deleteMany({
-      where: {
-        habitId,
-        date: dateOnly,
-      },
-    });
+    await this.db
+      .delete(schema.habitLogs)
+      .where(
+        and(
+          eq(schema.habitLogs.habitId, habitId),
+          eq(schema.habitLogs.date, dateOnly),
+        ),
+      );
 
     await this.updateStreak(habitId);
 
@@ -130,12 +143,12 @@ export class HabitsService {
   }
 
   private async updateStreak(habitId: string) {
-    const habit = await this.prisma.habit.findUnique({
-      where: { id: habitId },
-      include: {
+    const habit = await this.db.query.habits.findFirst({
+      where: eq(schema.habits.id, habitId),
+      with: {
         logs: {
-          orderBy: { date: "desc" },
-          take: 365,
+          orderBy: (logs, { desc }) => [desc(logs.date)],
+          limit: 365,
         },
       },
     });
@@ -160,7 +173,7 @@ export class HabitsService {
       if (latestLogStr < yesterdayStr && latestLogStr !== todayStr) {
         streak = 0;
       } else {
-        // Start checking from the most recent completed date found (could be in the future for testing)
+        // Start checking from the most recent completed date found
         const [year, month, day] = latestLogStr.split("-").map(Number);
         const checkDate = new Date(Date.UTC(year, month - 1, day));
         let checkDateStr = latestLogStr;
@@ -179,10 +192,10 @@ export class HabitsService {
       updates.longestStreak = streak;
     }
 
-    await this.prisma.habit.update({
-      where: { id: habitId },
-      data: updates,
-    });
+    await this.db
+      .update(schema.habits)
+      .set(updates)
+      .where(eq(schema.habits.id, habitId));
   }
 
   async getStats(userId: string, habitId: string) {
@@ -193,26 +206,27 @@ export class HabitsService {
     const thisWeekStart = startOfWeek(todayUtc, { weekStartsOn: 1 });
     const thisWeekEnd = endOfWeek(todayUtc, { weekStartsOn: 1 });
 
-    const thisWeekLogs = await this.prisma.habitLog.count({
-      where: {
-        habitId,
-        date: {
-          gte: thisWeekStart,
-          lte: thisWeekEnd,
-        },
-      },
-    });
+    const [thisWeekLogs] = await this.db
+      .select({ value: count() })
+      .from(schema.habitLogs)
+      .where(
+        and(
+          eq(schema.habitLogs.habitId, habitId),
+          gte(schema.habitLogs.date, thisWeekStart),
+          lte(schema.habitLogs.date, thisWeekEnd),
+        ),
+      );
 
-    const totalCompletions = await this.prisma.habitLog.aggregate({
-      where: { habitId },
-      _sum: { count: true },
-    });
+    const [totalCompletions] = await this.db
+      .select({ value: sum(schema.habitLogs.count) })
+      .from(schema.habitLogs)
+      .where(eq(schema.habitLogs.habitId, habitId));
 
     return {
       currentStreak: habit.currentStreak,
       longestStreak: habit.longestStreak,
-      thisWeekCompletions: thisWeekLogs,
-      totalCompletions: totalCompletions._sum.count || 0,
+      thisWeekCompletions: thisWeekLogs?.value || 0,
+      totalCompletions: Number(totalCompletions?.value) || 0,
     };
   }
 }

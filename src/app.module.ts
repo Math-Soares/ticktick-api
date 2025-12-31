@@ -1,7 +1,7 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { SupabaseModule } from './supabase/supabase.module';
-import { PrismaModule } from './prisma/prisma.module';
+import { DrizzleModule } from './drizzle/drizzle.module';
 import { AuthModule } from './modules/auth/auth.module';
 import { TasksModule } from './modules/tasks/tasks.module';
 import { ListsModule } from './modules/lists/lists.module';
@@ -13,7 +13,7 @@ import { AiModule } from './modules/ai/ai.module';
   imports: [
     ConfigModule.forRoot({ isGlobal: true }),
     SupabaseModule,
-    PrismaModule,
+    DrizzleModule,
     AuthModule,
     TasksModule,
     ListsModule,

@@ -1,5 +1,8 @@
-import { Injectable, NotFoundException } from "@nestjs/common";
-import { PrismaService } from "../../prisma/prisma.service";
+import { Injectable, NotFoundException, Inject } from "@nestjs/common";
+import { DRIZZLE } from "../../drizzle/drizzle.provider";
+import { NodePgDatabase } from "drizzle-orm/node-postgres";
+import * as schema from "../../drizzle/schema";
+import { eq, and, isNull, isNotNull, asc, desc, gte, lte } from "drizzle-orm";
 import { TasksGateway } from "./tasks.gateway";
 import { TaskParserService } from "./nlp/task-parser.service";
 import { CreateTaskDto, UpdateTaskDto, QuickAddDto } from "./dto/tasks.dto";
@@ -7,18 +10,19 @@ import { CreateTaskDto, UpdateTaskDto, QuickAddDto } from "./dto/tasks.dto";
 @Injectable()
 export class TasksService {
   constructor(
-    private prisma: PrismaService,
+    @Inject(DRIZZLE) private db: NodePgDatabase<typeof schema>,
     private tasksGateway: TasksGateway,
     private taskParser: TaskParserService,
-  ) {}
+  ) { }
 
   async quickAdd(userId: string, dto: QuickAddDto) {
     // Parse natural language input
     const parsed = this.taskParser.parse(dto.input);
 
     // Create task with parsed data
-    const task = await this.prisma.task.create({
-      data: {
+    const [task] = await this.db
+      .insert(schema.tasks)
+      .values({
         title: parsed.title,
         dueDate: parsed.dueDate,
         dueTime: parsed.dueTime,
@@ -27,8 +31,8 @@ export class TasksService {
         tags: parsed.tags.join(","),
         userId,
         listId: dto.listId,
-      },
-    });
+      })
+      .returning();
 
     // Emit real-time update
     this.tasksGateway.emitTaskUpdate(userId, "task:created", task);
@@ -37,75 +41,92 @@ export class TasksService {
   }
 
   async create(userId: string, dto: CreateTaskDto) {
-    const task = await this.prisma.task.create({
-      data: {
-        ...dto,
+    const taskData: any = { ...dto };
+    if (dto.dueDate) {
+      taskData.dueDate = new Date(dto.dueDate);
+    }
+
+    const [task] = await this.db
+      .insert(schema.tasks)
+      .values({
+        ...taskData,
         userId,
-      },
-    });
+      })
+      .returning();
 
     this.tasksGateway.emitTaskUpdate(userId, "task:created", task);
     return task;
   }
 
   async findAll(userId: string) {
-    return this.prisma.task.findMany({
-      where: { userId, deletedAt: null },
+    return this.db.query.tasks.findMany({
+      where: and(
+        eq(schema.tasks.userId, userId),
+        isNull(schema.tasks.deletedAt),
+      ),
       orderBy: [
-        { completedAt: "asc" },
-        { dueDate: "asc" },
-        { position: "asc" },
+        asc(schema.tasks.completedAt),
+        asc(schema.tasks.dueDate),
+        asc(schema.tasks.position),
       ],
-      include: { list: true },
+      with: { list: true },
     });
   }
 
   async findByList(userId: string, listId: string) {
-    return this.prisma.task.findMany({
-      where: { userId, listId, deletedAt: null },
-      orderBy: [{ completedAt: "asc" }, { position: "asc" }],
+    return this.db.query.tasks.findMany({
+      where: and(
+        eq(schema.tasks.userId, userId),
+        eq(schema.tasks.listId, listId),
+        isNull(schema.tasks.deletedAt),
+      ),
+      orderBy: [asc(schema.tasks.completedAt), asc(schema.tasks.position)],
     });
   }
 
   async findCompleted(userId: string) {
-    return this.prisma.task.findMany({
-      where: {
-        userId,
-        deletedAt: null,
-        completedAt: { not: null },
-      },
-      orderBy: { completedAt: "desc" },
-      include: { list: true },
+    return this.db.query.tasks.findMany({
+      where: and(
+        eq(schema.tasks.userId, userId),
+        isNull(schema.tasks.deletedAt),
+        isNotNull(schema.tasks.completedAt),
+      ),
+      orderBy: [desc(schema.tasks.completedAt)],
+      with: { list: true },
     });
   }
 
   async findTrash(userId: string) {
-    return this.prisma.task.findMany({
-      where: { userId, deletedAt: { not: null } },
-      orderBy: { deletedAt: "desc" },
-      include: { list: true },
+    return this.db.query.tasks.findMany({
+      where: and(
+        eq(schema.tasks.userId, userId),
+        isNotNull(schema.tasks.deletedAt),
+      ),
+      orderBy: [desc(schema.tasks.deletedAt)],
+      with: { list: true },
     });
   }
 
   async findByDateRange(userId: string, start: Date, end: Date) {
-    return this.prisma.task.findMany({
-      where: {
-        userId,
-        deletedAt: null,
-        dueDate: {
-          gte: start,
-          lte: end,
-        },
-      },
-      orderBy: { dueDate: "asc" },
-      include: { list: true },
+    return this.db.query.tasks.findMany({
+      where: and(
+        eq(schema.tasks.userId, userId),
+        isNull(schema.tasks.deletedAt),
+        gte(schema.tasks.dueDate, start),
+        lte(schema.tasks.dueDate, end),
+      ),
+      orderBy: [asc(schema.tasks.dueDate)],
+      with: { list: true },
     });
   }
 
   async findOne(userId: string, taskId: string) {
-    const task = await this.prisma.task.findFirst({
-      where: { id: taskId, userId },
-      include: { list: true },
+    const task = await this.db.query.tasks.findFirst({
+      where: and(
+        eq(schema.tasks.id, taskId),
+        eq(schema.tasks.userId, userId),
+      ),
+      with: { list: true },
     });
 
     if (!task) {
@@ -118,10 +139,16 @@ export class TasksService {
   async update(userId: string, taskId: string, dto: UpdateTaskDto) {
     await this.findOne(userId, taskId); // Ensure task exists
 
-    const task = await this.prisma.task.update({
-      where: { id: taskId },
-      data: dto,
-    });
+    const updateData: any = { ...dto };
+    if (dto.dueDate) {
+      updateData.dueDate = new Date(dto.dueDate);
+    }
+
+    const [task] = await this.db
+      .update(schema.tasks)
+      .set(updateData)
+      .where(eq(schema.tasks.id, taskId))
+      .returning();
 
     this.tasksGateway.emitTaskUpdate(userId, "task:updated", task);
     return task;
@@ -130,10 +157,11 @@ export class TasksService {
   async complete(userId: string, taskId: string) {
     await this.findOne(userId, taskId);
 
-    const task = await this.prisma.task.update({
-      where: { id: taskId },
-      data: { completedAt: new Date() },
-    });
+    const [task] = await this.db
+      .update(schema.tasks)
+      .set({ completedAt: new Date() })
+      .where(eq(schema.tasks.id, taskId))
+      .returning();
 
     this.tasksGateway.emitTaskUpdate(userId, "task:completed", task);
     return task;
@@ -142,10 +170,11 @@ export class TasksService {
   async uncomplete(userId: string, taskId: string) {
     await this.findOne(userId, taskId);
 
-    const task = await this.prisma.task.update({
-      where: { id: taskId },
-      data: { completedAt: null },
-    });
+    const [task] = await this.db
+      .update(schema.tasks)
+      .set({ completedAt: null })
+      .where(eq(schema.tasks.id, taskId))
+      .returning();
 
     this.tasksGateway.emitTaskUpdate(userId, "task:updated", task);
     return task;
@@ -155,10 +184,10 @@ export class TasksService {
   async delete(userId: string, taskId: string) {
     await this.findOne(userId, taskId);
 
-    const task = await this.prisma.task.update({
-      where: { id: taskId },
-      data: { deletedAt: new Date() },
-    });
+    await this.db
+      .update(schema.tasks)
+      .set({ deletedAt: new Date() })
+      .where(eq(schema.tasks.id, taskId));
 
     this.tasksGateway.emitTaskUpdate(userId, "task:deleted", { id: taskId });
     return { success: true };
@@ -167,10 +196,11 @@ export class TasksService {
   async restore(userId: string, taskId: string) {
     await this.findOne(userId, taskId);
 
-    const task = await this.prisma.task.update({
-      where: { id: taskId },
-      data: { deletedAt: null },
-    });
+    const [task] = await this.db
+      .update(schema.tasks)
+      .set({ deletedAt: null })
+      .where(eq(schema.tasks.id, taskId))
+      .returning();
 
     this.tasksGateway.emitTaskUpdate(userId, "task:created", task); // Re-emit as created for lists to pick up
     return task;
@@ -179,9 +209,7 @@ export class TasksService {
   async permanentDelete(userId: string, taskId: string) {
     await this.findOne(userId, taskId);
 
-    await this.prisma.task.delete({
-      where: { id: taskId },
-    });
+    await this.db.delete(schema.tasks).where(eq(schema.tasks.id, taskId));
 
     return { success: true };
   }
@@ -189,10 +217,11 @@ export class TasksService {
   async reorder(userId: string, taskId: string, newPosition: number) {
     await this.findOne(userId, taskId);
 
-    const task = await this.prisma.task.update({
-      where: { id: taskId },
-      data: { position: newPosition },
-    });
+    const [task] = await this.db
+      .update(schema.tasks)
+      .set({ position: newPosition })
+      .where(eq(schema.tasks.id, taskId))
+      .returning();
 
     this.tasksGateway.emitTaskUpdate(userId, "task:reordered", task);
     return task;
@@ -201,19 +230,23 @@ export class TasksService {
   async moveToList(userId: string, taskId: string, listId: string | null) {
     await this.findOne(userId, taskId);
 
-    const task = await this.prisma.task.update({
-      where: { id: taskId },
-      data: { listId },
-    });
+    const [task] = await this.db
+      .update(schema.tasks)
+      .set({ listId })
+      .where(eq(schema.tasks.id, taskId))
+      .returning();
 
     this.tasksGateway.emitTaskUpdate(userId, "task:moved", task);
     return task;
   }
 
   async clearTrash(userId: string) {
-    await this.prisma.task.deleteMany({
-      where: { userId, deletedAt: { not: null } },
-    });
+    await this.db.delete(schema.tasks).where(
+      and(
+        eq(schema.tasks.userId, userId),
+        isNotNull(schema.tasks.deletedAt),
+      ),
+    );
     return { success: true };
   }
 }
