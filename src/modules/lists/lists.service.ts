@@ -34,7 +34,7 @@ export class ListsService {
       extras: {
         taskCount:
           sql<number>`(SELECT count(*) FROM "Task" WHERE "Task"."listId" = "lists"."id" AND "Task"."deletedAt" IS NULL AND "Task"."completedAt" IS NULL)`.as(
-            "task_count",
+            "task_count", // Counts active tasks only
           ),
       },
     });
