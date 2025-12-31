@@ -1,0 +1,130 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
+// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
+
+generator client {
+  provider = "prisma-client"
+  output   = "../generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model User {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  name      String
+  password  String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tasks  Task[]
+  habits Habit[]
+  lists  List[]
+}
+
+model List {
+  id        String   @id @default(cuid())
+  name      String
+  color     String   @default("#6366f1")
+  icon      String?
+  position  Int      @default(0)
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tasks     Task[]
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId])
+}
+
+model Task {
+  id          String    @id @default(cuid())
+  title       String
+  description String?
+  priority    Int       @default(0)
+  position    Int       @default(0)
+
+  dueDate     DateTime?
+  dueTime     String?
+  endTime     String?
+  completedAt DateTime?
+
+  recurrenceRule String?
+  recurrenceEnd  DateTime?
+  parentTaskId   String?
+  parentTask     Task?     @relation("TaskRecurrence", fields: [parentTaskId], references: [id])
+  instances      Task[]    @relation("TaskRecurrence")
+
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  listId String?
+  list   List?  @relation(fields: [listId], references: [id], onDelete: SetNull)
+
+  estimatedPomos Int @default(0)
+  completedPomos Int @default(0)
+
+  tags        String       @default("")
+  deletedAt   DateTime?
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+  attachments Attachment[]
+
+  @@index([userId, dueDate])
+  @@index([userId, completedAt])
+  @@index([userId, deletedAt])
+  @@index([listId])
+}
+
+model Attachment {
+  id         String   @id @default(cuid())
+  filename   String
+  storedName String
+  mimeType   String
+  size       Int
+  taskId     String
+  task       Task     @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  createdAt  DateTime @default(now())
+
+  @@index([taskId])
+}
+
+model Habit {
+  id          String         @id @default(cuid())
+  name        String
+  description String?
+  icon        String         @default("🎯")
+  color       String         @default("#22c55e")
+  frequency   String         @default("DAILY")
+  targetDays  String         @default("")
+  targetCount Int            @default(1)
+
+  currentStreak Int @default(0)
+  longestStreak Int @default(0)
+
+  userId String
+  user   User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  logs   HabitLog[]
+
+  startDate  DateTime  @default(now())
+  archivedAt DateTime?
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+
+  @@index([userId, archivedAt])
+}
+
+model HabitLog {
+  id      String   @id @default(cuid())
+  habitId String
+  habit   Habit    @relation(fields: [habitId], references: [id], onDelete: Cascade)
+  date    DateTime
+  count   Int      @default(1)
+  notes   String?
+
+  @@unique([habitId, date])
+  @@index([habitId, date])
+}
